@@ -1,0 +1,120 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ─── Helper functions ───────────────────────────────────────────────────
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    function matchNotStarted(matchId) {
+      let matchData = get(/databases/$(database)/documents/matches/$(matchId)).data;
+      return matchData.kickoffTime > request.time;
+    }
+
+    // ─── Users ──────────────────────────────────────────────────────────────
+
+    match /users/{userId} {
+      // Users can read their own document; admins can read all
+      allow read: if isOwner(userId) || isAdmin();
+
+      // Users can create their own document (on registration)
+      allow create: if isOwner(userId)
+        && request.resource.data.role == 'user'
+        && request.resource.data.uid == userId;
+
+      // Users can update their own document but cannot change role or points
+      allow update: if isOwner(userId)
+        && !('role' in request.resource.data.diff(resource.data).affectedKeys())
+        && !('totalPoints' in request.resource.data.diff(resource.data).affectedKeys())
+        && !('exactScores' in request.resource.data.diff(resource.data).affectedKeys())
+        && !('correctWinners' in request.resource.data.diff(resource.data).affectedKeys())
+        && !('wrongPredictions' in request.resource.data.diff(resource.data).affectedKeys());
+
+      // Admins can update any user (to change role, for example)
+      allow update: if isAdmin();
+
+      allow delete: if isAdmin();
+    }
+
+    // ─── Matches ────────────────────────────────────────────────────────────
+
+    match /matches/{matchId} {
+      // Any authenticated user can read matches
+      allow read: if isAuthenticated();
+
+      // Only admins can create, update, delete
+      allow create, update, delete: if isAdmin();
+    }
+
+    // ─── Predictions ────────────────────────────────────────────────────────
+
+    match /predictions/{predictionId} {
+      // Users can read their own predictions; admins can read all
+      allow read: if isAuthenticated() &&
+        (resource.data.userId == request.auth.uid || isAdmin());
+
+      // Users can create a prediction for themselves, only if match hasn't started
+      allow create: if isAuthenticated()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.points == null
+        && request.resource.data.result == null
+        && request.resource.data.isLocked == false
+        && matchNotStarted(request.resource.data.matchId);
+
+      // Users can update their own prediction only if NOT locked and match hasn't started
+      allow update: if isAuthenticated()
+        && resource.data.userId == request.auth.uid
+        && resource.data.isLocked == false
+        && !('userId' in request.resource.data.diff(resource.data).affectedKeys())
+        && !('matchId' in request.resource.data.diff(resource.data).affectedKeys())
+        && !('points' in request.resource.data.diff(resource.data).affectedKeys())
+        && !('result' in request.resource.data.diff(resource.data).affectedKeys())
+        && !('isLocked' in request.resource.data.diff(resource.data).affectedKeys())
+        && matchNotStarted(resource.data.matchId);
+
+      // Cloud Functions (admin SDK) bypass these rules; admins can do anything
+      allow write: if isAdmin();
+
+      allow delete: if isAdmin();
+    }
+
+    // ─── Rankings ────────────────────────────────────────────────────────────
+
+    match /rankings/{userId} {
+      // Any authenticated user can read rankings (public leaderboard)
+      allow read: if isAuthenticated();
+
+      // Only Cloud Functions (via Admin SDK) should write rankings
+      // Admins can also write for manual corrections
+      allow write: if isAdmin();
+    }
+
+    // ─── Matchday Rankings ────────────────────────────────────────────────────
+
+    match /matchday_rankings/{docId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    // ─── Settings ────────────────────────────────────────────────────────────
+
+    match /settings/{docId} {
+      // Any authenticated user can read settings (for registration open, etc.)
+      allow read: if isAuthenticated();
+
+      // Only admins can change settings
+      allow write: if isAdmin();
+    }
+  }
+}
